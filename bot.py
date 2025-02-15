@@ -1,26 +1,69 @@
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from database import init_db, search_parts, get_scrapyards, add_scrapyard, edit_scrapyard, delete_scrapyard
+import psycopg2
+import os
 from config import TOKEN, ADMIN_ID
 
-# Инициализация базы данных
-init_db()
+# Получение данных из переменных окружения
+DB_NAME = os.getenv("DB_NAME")
+DB_USER = os.getenv("DB_USER")
+DB_PASSWORD = os.getenv("DB_PASSWORD")
+DB_HOST = os.getenv("DB_HOST")
+DB_PORT = os.getenv("DB_PORT")
+
+# Функция для подключения к базе данных
+def connect_to_db():
+    try:
+        conn = psycopg2.connect(
+            dbname=DB_NAME,
+            user=DB_USER,
+            password=DB_PASSWORD,
+            host=DB_HOST,
+            port=DB_PORT
+        )
+        return conn
+    except Exception as e:
+        print(f"Ошибка подключения к базе данных: {e}")
+        return None
+
+# Функция для поиска запчастей
+def search_parts(part_name: str):
+    conn = connect_to_db()
+    if conn:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM parts WHERE name ILIKE %s;", (f"%{part_name}%",))
+                results = cur.fetchall()
+                return results
+        finally:
+            conn.close()
+    return []
+
+# Функция для получения списка разборок
+def get_scrapyards():
+    conn = connect_to_db()
+    if conn:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM scrapyards;")
+                results = cur.fetchall()
+                return results
+        finally:
+            conn.close()
+    return []
 
 # Обработчик команды /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [["Новые запчасти", "Б/У запчасти"], ["Разборки"]]
+    keyboard = [["Б/У запчасти"], ["Разборки"]]  # Убрали "Новые запчасти"
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text("Выберите категорию:", reply_markup=reply_markup)
 
 # Обработка выбора категории
 async def handle_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
-    if text == "Новые запчасти":
+    if text == "Б/У запчасти":
         await update.message.reply_text("Введите название запчасти:")
-        context.user_data['category'] = 'new'  # Сохраняем выбранную категорию
-    elif text == "Б/У запчасти":
-        await update.message.reply_text("Введите название запчасти:")
-        context.user_data['category'] = 'used'
+        context.user_data['category'] = 'used'  # Сохраняем выбранную категорию
     elif text == "Разборки":
         await handle_scrapyards(update, context)
 
@@ -60,8 +103,15 @@ async def add_scrapyard_command(update: Update, context: ContextTypes.DEFAULT_TY
 
     try:
         name, phone = context.args  # Ожидаем два аргумента: название и номер
-        add_scrapyard(name, phone)
-        await update.message.reply_text(f"Разборка '{name}' добавлена.")
+        conn = connect_to_db()
+        if conn:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("INSERT INTO scrapyards (name, phone) VALUES (%s, %s);", (name, phone))
+                    conn.commit()
+                await update.message.reply_text(f"Разборка '{name}' добавлена.")
+            finally:
+                conn.close()
     except ValueError:
         await update.message.reply_text("Используйте команду так: /add_scrapyard Название Номер")
 
@@ -74,8 +124,15 @@ async def edit_scrapyard_command(update: Update, context: ContextTypes.DEFAULT_T
 
     try:
         scrapyard_id, new_name, new_phone = context.args
-        edit_scrapyard(int(scrapyard_id), new_name, new_phone)
-        await update.message.reply_text(f"Разборка с ID {scrapyard_id} обновлена.")
+        conn = connect_to_db()
+        if conn:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("UPDATE scrapyards SET name = %s, phone = %s WHERE id = %s;", (new_name, new_phone, scrapyard_id))
+                    conn.commit()
+                await update.message.reply_text(f"Разборка с ID {scrapyard_id} обновлена.")
+            finally:
+                conn.close()
     except ValueError:
         await update.message.reply_text("Используйте команду так: /edit_scrapyard ID Новое_название Новый_номер")
 
@@ -88,8 +145,15 @@ async def delete_scrapyard_command(update: Update, context: ContextTypes.DEFAULT
 
     try:
         scrapyard_id = context.args[0]
-        delete_scrapyard(int(scrapyard_id))
-        await update.message.reply_text(f"Разборка с ID {scrapyard_id} удалена.")
+        conn = connect_to_db()
+        if conn:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM scrapyards WHERE id = %s;", (scrapyard_id,))
+                    conn.commit()
+                await update.message.reply_text(f"Разборка с ID {scrapyard_id} удалена.")
+            finally:
+                conn.close()
     except ValueError:
         await update.message.reply_text("Используйте команду так: /delete_scrapyard ID")
 
