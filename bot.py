@@ -1,45 +1,34 @@
 from telegram import Update, ReplyKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 import psycopg2
 import os
-from config import TOKEN, ADMIN_ID
+from dotenv import load_dotenv
 
-# Получение данных из переменных окружения
-DB_NAME = os.getenv("DB_NAME")
-DB_USER = os.getenv("DB_USER")
-DB_PASSWORD = os.getenv("DB_PASSWORD")
-DB_HOST = os.getenv("DB_HOST")
-DB_PORT = os.getenv("DB_PORT")
+# Загрузите переменные окружения
+load_dotenv()
 
-# Функция для подключения к базе данных
+# Получите токен бота
+TOKEN = os.getenv("TOKEN")
+
+# Состояния
+BRAND, MODEL, YEAR, PART_NAME = range(4)
+
+# Подключение к базе данных
 def connect_to_db():
     try:
         conn = psycopg2.connect(
-            dbname=DB_NAME,
-            user=DB_USER,
-            password=DB_PASSWORD,
-            host=DB_HOST,
-            port=DB_PORT
+            dbname=os.getenv("DB_NAME"),
+            user=os.getenv("DB_USER"),
+            password=os.getenv("DB_PASSWORD"),
+            host="amvera-hackmir-cnpg-raz-rw",  # Доменное имя для чтения/записи
+            port=int(os.getenv("DB_PORT"))  # Порт (обычно 5432)
         )
         return conn
     except Exception as e:
         print(f"Ошибка подключения к базе данных: {e}")
         return None
 
-# Функция для поиска запчастей
-def search_parts(part_name: str):
-    conn = connect_to_db()
-    if conn:
-        try:
-            with conn.cursor() as cur:
-                cur.execute("SELECT * FROM parts WHERE name ILIKE %s;", (f"%{part_name}%",))
-                results = cur.fetchall()
-                return results
-        finally:
-            conn.close()
-    return []
-
-# Функция для получения списка разборок
+# Получение списка разборок
 def get_scrapyards():
     conn = connect_to_db()
     if conn:
@@ -54,122 +43,100 @@ def get_scrapyards():
 
 # Обработчик команды /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [["Б/У запчасти"], ["Разборки"]]  # Убрали "Новые запчасти"
+    keyboard = [["Найти запчасть"], ["Список разборок"]]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    await update.message.reply_text("Выберите категорию:", reply_markup=reply_markup)
+    await update.message.reply_text("Наш бот занимаеться поиском и подбором Б/У запчастей. Выберете что Вам нужно:", reply_markup=reply_markup)
 
 # Обработка выбора категории
 async def handle_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     if text == "Б/У запчасти":
-        await update.message.reply_text("Введите название запчасти:")
-        context.user_data['category'] = 'used'  # Сохраняем выбранную категорию
+        await update.message.reply_text("Введите марку автомобиля:")
+        return BRAND
     elif text == "Разборки":
         await handle_scrapyards(update, context)
+        return ConversationHandler.END
 
-# Обработка ввода названия запчасти
+# Обработка марки автомобиля
+async def handle_brand(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    brand = update.message.text
+    context.user_data['brand'] = brand
+    await update.message.reply_text("Введите модель автомобиля:")
+    return MODEL
+
+# Обработка модели автомобиля
+async def handle_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    model = update.message.text
+    context.user_data['model'] = model
+    await update.message.reply_text("Введите год выпуска автомобиля:")
+    return YEAR
+
+# Обработка года выпуска
+async def handle_year(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    year = update.message.text
+    context.user_data['year'] = year
+    await update.message.reply_text("Введите название запчасти:")
+    return PART_NAME
+
+# Обработка названия запчасти
 async def handle_part_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     part_name = update.message.text
-    results = search_parts(part_name)  # Ищем запчасти
+    user_data = context.user_data
 
-    if results:
-        response = "Результаты поиска:\n"
-        for part in results:
-            response += f"{part[1]} ({part[2]}): {part[3]} руб.\n"
-    else:
-        response = "Запчасти не найдены."
+    # Сохраняем данные
+    user_data['part_name'] = part_name
+    user_data['username'] = update.message.from_user.username
+    user_data['user_id'] = update.message.from_user.id
 
-    await update.message.reply_text(response)
+    # Отправляем заявку администратору
+    await send_request_to_admin(context, user_data)
 
-# Обработка выбора "Разборки"
+    # Отвечаем пользователю
+    await update.message.reply_text("Ваша заявка принята, ожидайте.")
+
+    # Очищаем данные
+    user_data.clear()
+    return ConversationHandler.END
+
+# Обработка разборок
 async def handle_scrapyards(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    scrapyards = get_scrapyards()  # Получаем список разборок
-
+    scrapyards = get_scrapyards()
     if scrapyards:
         response = "Список разборок:\n"
         for scrapyard in scrapyards:
             response += f"{scrapyard[1]}: {scrapyard[2]}\n"
     else:
         response = "Разборки не найдены."
-
     await update.message.reply_text(response)
 
-# Обработчик для добавления разборки (только для администратора)
-async def add_scrapyard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    if user_id != ADMIN_ID:
-        await update.message.reply_text("У вас нет прав для выполнения этой команды.")
-        return
-
-    try:
-        name, phone = context.args  # Ожидаем два аргумента: название и номер
-        conn = connect_to_db()
-        if conn:
-            try:
-                with conn.cursor() as cur:
-                    cur.execute("INSERT INTO scrapyards (name, phone) VALUES (%s, %s);", (name, phone))
-                    conn.commit()
-                await update.message.reply_text(f"Разборка '{name}' добавлена.")
-            finally:
-                conn.close()
-    except ValueError:
-        await update.message.reply_text("Используйте команду так: /add_scrapyard Название Номер")
-
-# Обработчик для редактирования разборки (только для администратора)
-async def edit_scrapyard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    if user_id != ADMIN_ID:
-        await update.message.reply_text("У вас нет прав для выполнения этой команды.")
-        return
-
-    try:
-        scrapyard_id, new_name, new_phone = context.args
-        conn = connect_to_db()
-        if conn:
-            try:
-                with conn.cursor() as cur:
-                    cur.execute("UPDATE scrapyards SET name = %s, phone = %s WHERE id = %s;", (new_name, new_phone, scrapyard_id))
-                    conn.commit()
-                await update.message.reply_text(f"Разборка с ID {scrapyard_id} обновлена.")
-            finally:
-                conn.close()
-    except ValueError:
-        await update.message.reply_text("Используйте команду так: /edit_scrapyard ID Новое_название Новый_номер")
-
-# Обработчик для удаления разборки (только для администратора)
-async def delete_scrapyard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    if user_id != ADMIN_ID:
-        await update.message.reply_text("У вас нет прав для выполнения этой команды.")
-        return
-
-    try:
-        scrapyard_id = context.args[0]
-        conn = connect_to_db()
-        if conn:
-            try:
-                with conn.cursor() as cur:
-                    cur.execute("DELETE FROM scrapyards WHERE id = %s;", (scrapyard_id,))
-                    conn.commit()
-                await update.message.reply_text(f"Разборка с ID {scrapyard_id} удалена.")
-            finally:
-                conn.close()
-    except ValueError:
-        await update.message.reply_text("Используйте команду так: /delete_scrapyard ID")
+# Функция для отмены диалога
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Очищаем данные пользователя
+    context.user_data.clear()
+    # Отправляем сообщение о завершении
+    await update.message.reply_text("Диалог завершён.")
+    return ConversationHandler.END
 
 # Основная функция
 def main():
     application = Application.builder().token(TOKEN).build()
 
+    # Обработчик диалога для "Б/У запчасти"
+    conv_handler = ConversationHandler(
+        entry_points=[MessageHandler(filters.TEXT & ~filters.COMMAND, handle_category)],
+        states={
+            BRAND: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_brand)],
+            MODEL: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_model)],
+            YEAR: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_year)],
+            PART_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_part_name)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)]
+    )
+
     # Регистрируем обработчики
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_category))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_part_name))
-    application.add_handler(CommandHandler("add_scrapyard", add_scrapyard_command))
-    application.add_handler(CommandHandler("edit_scrapyard", edit_scrapyard_command))
-    application.add_handler(CommandHandler("delete_scrapyard", delete_scrapyard_command))
+    application.add_handler(conv_handler)
 
-    # Запускаем бота
     application.run_polling()
 
 if __name__ == "__main__":
